@@ -204,6 +204,7 @@ func (test *icmpV4Test) Send(t *testing.T, dut testbench.DUT, bindTo, sendTo net
 	}
 
 	expectPacket := isV4 && !sendTo.Equal(dut.Net.RemoteIPv4)
+	expectNetworkUnreachable := isV4 && !bindToDevice && !isInTestSubnetV4(dut, sendTo) && !isInTestSubnetV4(dut, bindTo)
 	switch {
 	case bindTo.Equal(dut.Net.RemoteIPv4):
 		// If we're explicitly bound to an interface's unicast address,
@@ -239,8 +240,12 @@ func (test *icmpV4Test) Send(t *testing.T, dut testbench.DUT, bindTo, sendTo net
 			copy(destSockaddr.Addr[:], sendTo.To4())
 
 			// Tell the DUT to send a packet out the ICMP socket.
-			if got, want := dut.SendTo(t, env.socketFD, bytes, 0, &destSockaddr), len(bytes); int(got) != want {
-				t.Fatalf("got dut.SendTo = %d, want %d", got, want)
+			ret, err := dut.SendToWithErrno(context.Background(), t, env.socketFD, bytes, 0, &destSockaddr)
+			if expectNetworkUnreachable && err != unix.ENETUNREACH {
+				t.Fatalf("got dut.SendToWithErrno = (_, nil), want %s", unix.ENETUNREACH)
+			}
+			if !expectNetworkUnreachable && int(ret) != len(bytes) {
+				t.Fatalf("got dut.SendToWithErrno = (%d, %s), want (%d, nil)", ret, err, len(bytes))
 			}
 
 			// Verify the test runner received an ICMP packet with the correctly
@@ -406,10 +411,8 @@ func (test *icmpV6Test) Send(t *testing.T, dut testbench.DUT, bindTo, sendTo net
 	// TODO(gvisor.dev/issue/5966): Remove this if statement once ICMPv6 sockets
 	// return EINVAL after calling sendto with an IPv4 address.
 	if (dut.Uname.IsGvisor() || dut.Uname.IsFuchsia()) && sendTo.To4() != nil {
-		switch {
-		case bindTo.Equal(dut.Net.RemoteIPv6):
-			wantErrno = unix.ENETUNREACH
-		case bindTo.Equal(net.IPv6zero) || bindTo == nil:
+		wantErrno = unix.ENETUNREACH
+		if !bindTo.Equal(dut.Net.RemoteIPv6) && (bindToDevice || isInTestSubnetV4(dut, sendTo)) {
 			wantErrno = unix.Errno(0)
 		}
 	}
@@ -641,6 +644,8 @@ func (test *udpTest) Send(t *testing.T, dut testbench.DUT, bindTo, sendTo net.IP
 		wantErrno = unix.EAFNOSUPPORT
 	case !canSend && bindTo.To4() == nil:
 		wantErrno = unix.ENETUNREACH
+	case !bindToDevice && sendTo.To4() != nil && !isInTestSubnetV4(dut, sendTo) && (!isInTestSubnetV4(dut, bindTo) || bindTo.Equal(dut.Net.SubnetBroadcast())):
+		wantErrno = unix.ENETUNREACH
 	}
 
 	// TODO(gvisor.dev/issue/5967): Remove this if statement once UDPv4 sockets
@@ -778,4 +783,12 @@ func sameIPVersion(a, b net.IP) bool {
 
 func isRemoteAddr(dut testbench.DUT, ip net.IP) bool {
 	return ip.Equal(dut.Net.RemoteIPv4) || ip.Equal(dut.Net.RemoteIPv6)
+}
+
+func isInTestSubnetV4(dut testbench.DUT, ip net.IP) bool {
+	network := net.IPNet{
+		IP:   dut.Net.LocalIPv4,
+		Mask: net.CIDRMask(dut.Net.IPv4PrefixLength, net.IPv4len*8),
+	}
+	return network.Contains(ip)
 }
