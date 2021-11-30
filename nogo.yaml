@@ -113,6 +113,8 @@ analyzers:
         - tools/bigquery/bigquery.go          # False positive.
   printf:
     external: # Enabled.
+      exclude:
+        - ".*pprof/internal/report/.*.go"
   shift:
     generated: # Disabled for generated code; these shifts are well-defined.
       exclude: [".*"]
